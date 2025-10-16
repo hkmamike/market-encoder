@@ -1,1 +1,1 @@
-# stanford-cs230
+# market encoder
