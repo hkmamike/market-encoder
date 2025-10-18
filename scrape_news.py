@@ -19,36 +19,63 @@ Example Usage:
   python scrape_news.py
 """
 import pandas as pd
-from datasets import load_dataset
+from datasets import load_dataset, Features, Value  # <-- IMPORT FEATURES AND VALUE
 import requests
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 import argparse
 import os
+import newspaper
 
 # --- Configuration ---
 DATASET_PATH = "Zihan1004/FNSPID"
 BASE_OUTPUT_FILENAME = 'financial_news_with_text'
 REQUEST_TIMEOUT = 10
 USER_AGENT = 'Mozilla/5.0'
+HUGGING_FACE_SPLIT = 'train'
+HUGGING_FACE_Data_COUNT = 100 # 'train' to get the full set
 
-def scrape_text(url):
-    """Scrapes the text content from a given URL."""
-    try:
-        response = requests.get(url, timeout=REQUEST_TIMEOUT, headers={'User-Agent': USER_AGENT})
-        response.raise_for_status()  # Raise an exception for bad status codes
-        soup = BeautifulSoup(response.content, 'html.parser')
+# def scrape_text_basic(url):
+#     """Scrapes the text content from a given URL."""
+#     try:
+#         response = requests.get(url, timeout=REQUEST_TIMEOUT, headers={'User-Agent': USER_AGENT})
+#         response.raise_for_status()  # Raise an exception for bad status codes
+#         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # This is a generic approach; you might need to refine selectors 
-        # based on the common structures of the news websites.
-        paragraphs = soup.find_all('p')
-        article_text = ' '.join([p.get_text() for p in paragraphs])
-        return article_text
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching {url}: {e}")
+#         # This is a generic approach; you might need to refine selectors 
+#         # based on the common structures of the news websites.
+#         paragraphs = soup.find_all('p')
+#         article_text = ' '.join([p.get_text() for p in paragraphs])
+#         return article_text
+#     except requests.exceptions.RequestException as e:
+#         print(f"Error fetching {url}: {e}")
+#         return ""
+#     except Exception as e:
+#         print(f"Error parsing {url}: {e}")
+#         return ""
+
+def scrape_text_v1(url):
+    """
+    Scrapes the main article text from a URL using the newspaper3k library.
+    """
+    try:
+        # Initialize the Article object
+        article = newspaper.Article(url)
+        
+        # Download the HTML
+        article.download()
+        
+        # Parse the article to find the main content
+        article.parse()
+        
+        # Return the extracted clean text
+        return article.text
+    
+    except newspaper.article.ArticleException as e:
+        print(f"Error processing article at {url}: {e}")
         return ""
     except Exception as e:
-        print(f"Error parsing {url}: {e}")
+        print(f"A general error occurred for {url}: {e}")
         return ""
 
 def main():
@@ -66,14 +93,33 @@ def main():
     )
     args = parser.parse_args()
 
+    # --- (FIX 1) Define the schema to prevent type-inference errors ---
+    # We force all columns to be read as strings
+    feature_schema = Features({
+        'Date': Value('string'),
+        'Article_title': Value('string'),
+        'Stock_symbol': Value('string'),
+        'Url': Value('string'),
+        'Publisher': Value('string')
+    })
+
     # --- Load Dataset (Hugging Face handles caching) ---
     print(f"Loading dataset from Hugging Face ({DATASET_PATH})...")
     print("The 'datasets' library will automatically use a local cache if available.")
-    dataset = load_dataset(DATASET_PATH, split='train')
+    # dataset = load_dataset(DATASET_PATH, split='train')
+    streaming_dataset = load_dataset(
+        DATASET_PATH,
+        split=HUGGING_FACE_SPLIT,
+        features=feature_schema,  # <-- PASS THE CORRECT 'features' ARGUMENT
+        streaming=True
+    )
+    partial_data_iterable = streaming_dataset.take(HUGGING_FACE_Data_COUNT)
+    print(f"Datastreaming Setup is done.")
+    partial_data_list = list(partial_data_iterable)
+    print(f"Datastreaming has been cast to list in memoery.")
     
     # Convert to pandas DataFrame for easier manipulation
-    df = dataset.to_pandas()
-    
+    df = pd.DataFrame(partial_data_list)
     print(f"Loaded {len(df)} articles.")
     
     # --- Limit rows for processing if specified ---
@@ -85,7 +131,7 @@ def main():
 
     # Scrape the text for each URL and add it to a new column
     tqdm.pandas(desc="Scraping Articles")
-    df['scraped_text'] = df['url'].progress_apply(scrape_text)
+    df['scraped_text'] = df['Url'].progress_apply(scrape_text_v1)
     
     # Determine output filename
     if args.num_rows is not None and args.num_rows > 0:
