@@ -1,6 +1,10 @@
+# Install Python3 - instructions TODO
+
 # Setup virtual env
 python3 -m venv venv-cs230
 source venv-cs230/bin/activate
+
+pip install -r requirements.txt
 
 # Setup - Gemini Cli (MacOS) - not working yet
 
