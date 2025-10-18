@@ -5,7 +5,7 @@ python3 -m venv venv-cs230
 source venv-cs230/bin/activate
 pip install -r requirements.txt
 
-## Environment verification - run the example model file to make sure it works
+## Environment Verification - run the example model file to make sure it works
 python3 fullRun.py     # don't check in the resulting files into github
 
 # Files Overview
