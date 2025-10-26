@@ -24,6 +24,7 @@ Example Usage:
   python scrape_news.py --percentage 100 --s3-key processed_data/financial_news_full.csv
 
   # To run a quick test on just 5 articles from the default sample
+  python scrape_news.py --num-rows 5
 """
 import pandas as pd
 from datasets import load_dataset, Features, Value  # <-- IMPORT FEATURES AND VALUE
