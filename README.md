@@ -5,8 +5,15 @@ python3 -m venv venv-cs230
 source venv-cs230/bin/activate
 pip install -r requirements.txt
 
+Note: if you installed new packages, run "pip freeze > requirements.txt" to update requirements.txt so others don't need to manually repeat it
+
 ## Environment Verification - run the example model file to make sure it works
 python3 fullRun.py     # don't check in the resulting files into github
+
+# Configure AWS Profile
+aws configure --profile team-s3-uploader
+
+It will prompt you for four things. Use the keys you just saved: AWS Access Key ID, AWS Secret Access Key, etc.
 
 # Files Overview
 fullRun.py                          <- unrelated to project, given by Section 3 TA, used to make sure the environment works as expected
