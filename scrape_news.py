@@ -13,13 +13,15 @@ Valid Command-Line Arguments:
                            the entire dataset will be processed.
   --s3-key [STRING]    : (Optional) The desired S3 object key (e.g., 'data/news.csv').
                            If not provided, a default name will be generated.
+  --full-scrape      : (Optional) If provided, the script will process the entire dataset,
+                           ignoring the HUGGING_FACE_Data_COUNT setting.
 
 Example Usage:
-  # To process a sample of 100 articles for testing
+  # To process a sample of 100 articles for testing (using the default count)
   python scrape_news.py --num-rows 100 --s3-key processed_data/financial_news_sample_100.csv
 
   # To process the entire dataset
-  python scrape_news.py --s3-key processed_data/financial_news_full.csv
+  python scrape_news.py --full-scrape --s3-key processed_data/financial_news_full.csv
 """
 import pandas as pd
 from datasets import load_dataset, Features, Value  # <-- IMPORT FEATURES AND VALUE
@@ -37,8 +39,8 @@ DATASET_PATH = "Zihan1004/FNSPID"
 BASE_OUTPUT_FILENAME = 'financial_news_with_text'
 REQUEST_TIMEOUT = 10
 USER_AGENT = 'Mozilla/5.0'
-HUGGING_FACE_SPLIT = 'train'
-HUGGING_FACE_Data_COUNT = 100 # 'train' to get the full set
+HUGGING_FACE_SPLIT = 'train' # train/validation/test
+HUGGING_FACE_Data_COUNT = 100 # only if --full-scrape=False
 
 # --- S3 Configuration ---
 S3_BUCKET_NAME = "cs230-market-data-2025"
@@ -142,6 +144,12 @@ def main():
         default=None,
         help="The S3 object key (path/filename) for the output file."
     )
+    parser.add_argument(
+        "--full-scrape",
+        action="store_true",
+        help="If specified, scrapes the entire dataset from Hugging Face, "
+             "ignoring the HUGGING_FACE_Data_COUNT setting."
+    )
     args = parser.parse_args()
 
     # Before running, check if the user has updated the placeholder bucket name
@@ -170,10 +178,17 @@ def main():
         features=feature_schema,  # <-- PASS THE CORRECT 'features' ARGUMENT
         streaming=True
     )
-    partial_data_iterable = streaming_dataset.take(HUGGING_FACE_Data_COUNT)
-    print(f"Datastreaming Setup is done.")
-    partial_data_list = list(partial_data_iterable)
-    print(f"Datastreaming has been cast to list in memoery.")
+
+    # --- Convert stream to list (full or partial) ---
+    if args.full_scrape:
+        print("Full scrape requested. Converting entire streaming dataset to a list...")
+        print("(This may take a long time and consume significant memory for large datasets)")
+        partial_data_list = list(streaming_dataset)
+    else:
+        print(f"Partial scrape. Taking the first {HUGGING_FACE_Data_COUNT} records from the stream...")
+        partial_data_iterable = streaming_dataset.take(HUGGING_FACE_Data_COUNT)
+        partial_data_list = list(partial_data_iterable)
+    print("Dataset has been loaded into memory.")
     
     # Convert to pandas DataFrame for easier manipulation
     df = pd.DataFrame(partial_data_list)
