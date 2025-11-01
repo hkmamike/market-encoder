@@ -285,22 +285,22 @@ if df is not None:
     # Save Encoder Model
     # ---------------------------------
     # To save the encoder, you can create a separate model after training
-    print("\n--- Step 10: Saving Encoder Model ---")
+    # print("\n--- Step 10: Saving Encoder Model ---")
     
-    # Create input layers for the encoder
-    input_ids = Input(shape=(MAX_LENGTH,), dtype='int32', name='input_ids')
-    attention_mask = Input(shape=(MAX_LENGTH,), dtype='int32', name='attention_mask')
+    # # Create input layers for the encoder
+    # input_ids = Input(shape=(MAX_LENGTH,), dtype='int32', name='input_ids')
+    # attention_mask = Input(shape=(MAX_LENGTH,), dtype='int32', name='attention_mask')
     
-    # Create the encoder model using the trained weights
-    encoder_model = Model(
-        inputs=[input_ids, attention_mask],
-        outputs=siamese_model.bert_encoder(input_ids=input_ids, attention_mask=attention_mask).pooler_output,
-        name="encoder"
-    )
+    # # Create the encoder model using the trained weights
+    # encoder_model = Model(
+    #     inputs=[input_ids, attention_mask],
+    #     outputs=siamese_model.bert_encoder(input_ids=input_ids, attention_mask=attention_mask).pooler_output,
+    #     name="encoder"
+    # )
 
-    encoder_model.save("finbert_encoder_model")
-    print("Encoder model saved to 'finbert_encoder_model'.")
-    print("You can now use this for the next stage of your project.")
+    # encoder_model.save("finbert_encoder_model")
+    # print("Encoder model saved to 'finbert_encoder_model'.")
+    # print("You can now use this for the next stage of your project.")
 
 else:
     print("\nSkipping training as DataFrame was not loaded.")
