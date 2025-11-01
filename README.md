@@ -13,7 +13,11 @@ python3 fullRun.py     # don't check in the resulting files into github
 # Configure AWS Profile
 aws configure --profile team-s3-uploader
 
-It will prompt you for four things. Use the keys you just saved: AWS Access Key ID, AWS Secret Access Key, etc.
+It will prompt you for four things. Use the keys you just saved: 
+AWS Access Key ID,
+AWS Secret Access Key, etc.
+
+For our team, this is in CS230 Tracker -> S3 bucket access tab
 
 # Files Overview
 fullRun.py                          <- unrelated to project, given by Section 3 TA, used to make sure the environment works as expected
