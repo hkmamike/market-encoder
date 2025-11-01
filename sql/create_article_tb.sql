@@ -10,3 +10,4 @@ LOCATION 's3://cs230-market-data-2025/all-data-no-scrape/'
 -- Using the exact TBLPROPERTIES from your working example.
 TBLPROPERTIES ( 'has_header'='true', 'skip.header.line.count'='1'
 )
+-- why 
