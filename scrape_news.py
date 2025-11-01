@@ -1,5 +1,6 @@
 """
-Scrapes financial news articles from URLs provided in a Hugging Face dataset.
+Scrapes financial news articles from URLs provided in a Hugging Face dataset
+and uploads the result directly to an S3 bucket.
 
 This script performs the following steps:
 1. Loads the dataset from Hugging Face, relying on the library's built-in cache.
@@ -8,15 +9,22 @@ This script performs the following steps:
 4. Saves the processed data to a new CSV file.
 
 Valid Command-Line Arguments:
-  --num-rows [INTEGER] : (Optional) The number of rows to process. If not provided,
-                           the entire dataset will be processed.
+  --percentage [FLOAT] : (Optional) The percentage of the dataset to process (0-100).
+                           Provides a consistent, reproducible sample. If this is not present, we only process 100 rows.
+  --num-rows [INTEGER] : (Optional) The number of rows to process from the loaded data.
+                           Useful for quick tests on a small number of articles.
+  --s3-key [STRING]    : (Optional) The desired S3 object key (e.g., 'data/news.csv').
+                           If not provided, a default name will be generated.
 
 Example Usage:
-  # To process a sample of 10 articles for testing
-  python scrape_news.py --num-rows 10
+  # To process a consistent 10% of the dataset
+  python scrape_news.py --percentage 10 --s3-key processed_data/financial_news_10_percent.csv
 
-  # To process the entire dataset
-  python scrape_news.py
+  # To process the full dataset (equivalent to --percentage 100)
+  python scrape_news.py --percentage 100 --s3-key processed_data/financial_news_full.csv
+
+  # To run a quick test on just 5 articles from the default sample
+  python scrape_news.py --num-rows 5
 """
 import pandas as pd
 from datasets import load_dataset, Features, Value  # <-- IMPORT FEATURES AND VALUE
@@ -24,16 +32,23 @@ import requests
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 import argparse
-import os
 import newspaper
+from io import StringIO
+import boto3
+from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
 
 # --- Configuration ---
 DATASET_PATH = "Zihan1004/FNSPID"
 BASE_OUTPUT_FILENAME = 'financial_news_with_text'
 REQUEST_TIMEOUT = 10
 USER_AGENT = 'Mozilla/5.0'
-HUGGING_FACE_SPLIT = 'train'
-HUGGING_FACE_Data_COUNT = 100 # 'train' to get the full set
+HUGGING_FACE_SPLIT = 'train' # train/validation/test
+DEFAULT_SAMPLE_SIZE = 100 # Number of rows to load for quick tests if no percentage is given
+
+# --- S3 Configuration ---
+S3_BUCKET_NAME = "cs230-market-data-2025"
+AWS_REGION = "us-east-1"  # e.g., "us-east-1", "us-west-2"
+AWS_PROFILE_NAME = "team-s3-uploader"
 
 # def scrape_text_basic(url):
 #     """Scrapes the text content from a given URL."""
@@ -78,6 +93,41 @@ def scrape_text_v1(url):
         print(f"A general error occurred for {url}: {e}")
         return ""
 
+def upload_df_to_s3(df, bucket, s3_object_key, region):
+    """
+    Uploads a pandas DataFrame to an S3 bucket as a CSV file.
+
+    :param df: The pandas DataFrame to upload.
+    :param bucket: The S3 bucket to upload to.
+    :param s3_object_key: The desired object key (path/filename) in S3.
+    :param region: The AWS region of the bucket.
+    :return: True if upload was successful, else False.
+    """
+    print(f"Uploading DataFrame to bucket '{bucket}' as '{s3_object_key}'...")
+
+    # Convert DataFrame to CSV in-memory
+    csv_buffer = StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_content = csv_buffer.getvalue()
+
+    # Create a session using your specific profile
+    session = boto3.Session(profile_name=AWS_PROFILE_NAME, region_name=region)
+    s3_client = session.client('s3')
+    try:
+        s3_client.put_object(Bucket=bucket, Key=s3_object_key, Body=csv_content)
+        print("Upload Successful!")
+        return True
+    except (NoCredentialsError, PartialCredentialsError):
+        print("Error: AWS credentials not found.")
+        print("Please configure your credentials, for example, in ~/.aws/credentials")
+        return False
+    except ClientError as e:
+        print(f"An S3 client error occurred: {e}")
+        return False
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        return False
+
 def main():
     """
     Main function to load the dataset, scrape articles,
@@ -85,13 +135,38 @@ def main():
     """
     # --- Argument Parsing ---
     parser = argparse.ArgumentParser(description="Scrape financial news articles from URLs.")
+    
+    # Group for controlling dataset size
+    size_group = parser.add_mutually_exclusive_group()
+    size_group.add_argument(
+        "--percentage",
+        type=float,
+        help="Percentage of the dataset to load for scraping (0-100). "
+             "This provides a consistent, reproducible sample."
+    )
+    
     parser.add_argument(
         "--num-rows",
         type=int,
-        default=None,
-        help="Number of rows to process from the dataset. Processes all rows by default."
+        help="Number of rows to process from the loaded data. Overrides other settings for a quick test."
+    )
+    parser.add_argument(
+        "--s3-key",
+        type=str,
+        help="The S3 object key (path/filename) for the output file."
     )
     args = parser.parse_args()
+
+    # Before running, check if the user has updated the placeholder bucket name
+    if S3_BUCKET_NAME == "your-s3-bucket-name-here":
+        print("--- CONFIGURATION NEEDED ---")
+        print("Please edit 'scrape_news.py' and replace 'your-s3-bucket-name-here' with your actual S3 bucket name.")
+        return
+
+    # Validate percentage argument
+    if args.percentage is not None and not (0 < args.percentage <= 100):
+        print("Error: --percentage must be a value between 0 (exclusive) and 100 (inclusive).")
+        return
 
     # --- (FIX 1) Define the schema to prevent type-inference errors ---
     # We force all columns to be read as strings
@@ -103,26 +178,39 @@ def main():
         'Publisher': Value('string')
     })
 
+    # --- Determine which split of the data to load ---
+    if args.percentage:
+        split_str = f"{HUGGING_FACE_SPLIT}[:{int(args.percentage)}%]"
+        print(f"Loading a consistent {args.percentage}% of the '{HUGGING_FACE_SPLIT}' split...")
+    else:
+        # Default behavior: load a small, non-reproducible sample for quick testing
+        split_str = HUGGING_FACE_SPLIT
+        print(f"No percentage specified. Loading a default sample of {DEFAULT_SAMPLE_SIZE} rows for testing...")
+
     # --- Load Dataset (Hugging Face handles caching) ---
     print(f"Loading dataset from Hugging Face ({DATASET_PATH})...")
     print("The 'datasets' library will automatically use a local cache if available.")
-    # dataset = load_dataset(DATASET_PATH, split='train')
     streaming_dataset = load_dataset(
         DATASET_PATH,
-        split=HUGGING_FACE_SPLIT,
+        split=split_str,
         features=feature_schema,  # <-- PASS THE CORRECT 'features' ARGUMENT
         streaming=True
     )
-    partial_data_iterable = streaming_dataset.take(HUGGING_FACE_Data_COUNT)
-    print(f"Datastreaming Setup is done.")
-    partial_data_list = list(partial_data_iterable)
-    print(f"Datastreaming has been cast to list in memoery.")
+
+    # --- Convert stream to list in memory ---
+    # If no percentage is given, take only the default sample size from the stream
+    if not args.percentage:
+        data_iterable = streaming_dataset.take(DEFAULT_SAMPLE_SIZE)
+        data_list = list(data_iterable)
+    else:
+        data_list = list(streaming_dataset)
+    print("Dataset has been loaded into memory.")
     
     # Convert to pandas DataFrame for easier manipulation
-    df = pd.DataFrame(partial_data_list)
+    df = pd.DataFrame(data_list)
     print(f"Loaded {len(df)} articles.")
     
-    # --- Limit rows for processing if specified ---
+    # --- Limit rows for processing if --num-rows is specified for a quick test ---
     if args.num_rows is not None and args.num_rows > 0:
         print(f"Processing a sample of {args.num_rows} rows...")
         df = df.head(args.num_rows)
@@ -133,20 +221,22 @@ def main():
     tqdm.pandas(desc="Scraping Articles")
     df['scraped_text'] = df['Url'].progress_apply(scrape_text_v1)
     
-    # Determine output filename
-    if args.num_rows is not None and args.num_rows > 0:
-        output_filename = f'{BASE_OUTPUT_FILENAME}_sample_{args.num_rows}.csv'
+    # Determine S3 object key
+    if args.s3_key:
+        s3_object_key = args.s3_key
+    elif args.percentage:
+        s3_object_key = f'processed_data/{BASE_OUTPUT_FILENAME}_{int(args.percentage)}pct.csv'
     else:
-        output_filename = f'{BASE_OUTPUT_FILENAME}.csv'
-        
-    print(f"\nSaving the updated dataset to {output_filename}...")
-    df.to_csv(output_filename, index=False)
+        # Default filename for the default sample run
+        num_to_process = args.num_rows if args.num_rows else len(df)
+        s3_object_key = f'processed_data/{BASE_OUTPUT_FILENAME}_sample_{num_to_process}.csv'
     
-    print("Scraping and processing complete.")
+    # Upload the DataFrame directly to S3
+    upload_df_to_s3(df, S3_BUCKET_NAME, s3_object_key, AWS_REGION)
+    
     print("--- First 5 rows of the result ---")
     print(df.head())
 
 
 if __name__ == '__main__':
     main()
-
