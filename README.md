@@ -19,6 +19,10 @@ AWS Secret Access Key, etc.
 
 For our team, this is in CS230 Tracker -> S3 bucket access tab
 
+# Configure AWS Profile Credentials Debugging
+cat ~/.aws/credentials
+cat ~/.aws/config
+
 # Files Overview
 fullRun.py                          <- unrelated to project, given by Section 3 TA, used to make sure the environment works as expected
 

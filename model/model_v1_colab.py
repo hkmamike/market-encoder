@@ -1,6 +1,6 @@
 # ---------------------------------
 # Same as model_v0_colab, trying to improve training speed by freezing earlier layer weights
-# Status: Verified that it runs: https://screenshot.googleplex.com/3YWuAbcWEGaxAt3
+# Status: Verified that it runs: https://screenshot.googleplex.com/72MM73yZDPE2JkY
 # Training Time: 30s on Google Compute Backend Engine GPU
 # Next: wait for real training data.
 # ---------------------------------
