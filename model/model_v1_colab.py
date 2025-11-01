@@ -1,8 +1,8 @@
 # ---------------------------------
-# Same as model_v0, configured to work on colab
-# Status: verified that it trains on fake dataset
-# Training Time: 3 epoch took 218s: https://screenshot.googleplex.com/9jU9Xe4q48XsxgY
-# Next: maybe freeze most weights and only last layers to float
+# Same as model_v0_colab, trying to improve training speed by freezing earlier layer weights
+# Status: Unverified
+# Training Time: TBD
+# Next: TBD
 # ---------------------------------
 
 # ---------------------------------
@@ -158,7 +158,15 @@ class SiameseModel(Model):
         super(SiameseModel, self).__init__(**kwargs)
         # --- Define Shared Encoder ---
         self.bert_encoder = TFBertModel.from_pretrained(bert_model_name, from_pt=True)
-        self.bert_encoder.trainable = True
+        
+        # --- Freeze Layers ---
+        # Freeze the entire BERT model first
+        self.bert_encoder.trainable = False
+        
+        # Unfreeze the last two layers
+        num_layers_to_unfreeze = 2
+        for layer in self.bert_encoder.encoder.layer[-num_layers_to_unfreeze:]:
+            layer.trainable = True
 
     def call(self, inputs):
         # Unpack the inputs
@@ -202,6 +210,17 @@ def contrastive_loss(y_true, y_pred):
 with strategy.scope():
     # --- Instantiate the model ---
     siamese_model = SiameseModel(MODEL_NAME)
+    
+    # --- Build the model to create its weights ---
+    if df is not None:
+      _ = siamese_model(
+          {
+              'input_ids_1': X_train['input_ids_1'][:1],
+              'attention_mask_1': X_train['attention_mask_1'][:1],
+              'input_ids_2': X_train['input_ids_2'][:1],
+              'attention_mask_2': X_train['attention_mask_2'][:1]
+          }
+      )
 
     # ---------------------------------
     # Compile and Train
@@ -211,7 +230,6 @@ with strategy.scope():
     siamese_model.compile(
         loss=contrastive_loss,
         optimizer=tf.keras.optimizers.Adam(learning_rate=2e-5)
-        # Low learning rate is good for fine-tuning BERT
     )
 
 if df is not None:
