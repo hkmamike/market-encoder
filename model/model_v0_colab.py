@@ -1,7 +1,7 @@
 # ---------------------------------
 # Same as model_v0, configured to work on colab
-# Status: verified that it trains on fake dataset
-# Training Time: 3 epoch took 218s: https://screenshot.googleplex.com/9jU9Xe4q48XsxgY
+# Status: verified that it trains on fake dataset: https://screenshot.googleplex.com/9jU9Xe4q48XsxgY
+# Training Time: 3 epoch took 15 mins on CPU
 # Next: maybe freeze most weights and only last layers to float
 # ---------------------------------
 
@@ -9,7 +9,7 @@
 # Setup, verify access, and read training table
 # ---------------------------------
 !pip install awswrangler
-
+!pip install tensorflow
 # ---------------------------------
 
 import pandas as pd

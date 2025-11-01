@@ -9,7 +9,7 @@
 # Setup, verify access, and read training table
 # ---------------------------------
 !pip install awswrangler
-
+!pip install tensorflow
 # ---------------------------------
 
 import pandas as pd
@@ -165,7 +165,7 @@ class SiameseModel(Model):
         
         # Unfreeze the last two layers
         num_layers_to_unfreeze = 2
-        for layer in self.bert_encoder.encoder.layer[-num_layers_to_unfreeze:]:
+        for layer in self.bert_encoder.bert.encoder.layer[-num_layers_to_unfreeze:]:
             layer.trainable = True
 
     def call(self, inputs):
