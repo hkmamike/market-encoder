@@ -1,3 +1,4 @@
+# Status: unverified because Mike's laptop doesn't have TPU, creating v0_colab instead
 # Add these lines at the very top
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppresses INFO and WARNING logs
@@ -34,26 +35,29 @@ MAX_LENGTH = 256
 print(f"--- Step 2: Configuration set for {ATHENA_DB} ---")
 # ----------------------------------------------------
 
-# ---------------------------------
-# Initialize Distribution Strategy (TPU / GPU / CPU)
-# ---------------------------------
-print("\n--- Step 1.5: Initializing Distribution Strategy ---")
+# --- TPU Configuration ---
+print("\n--- Step 2: Configuring TPU ---")
 try:
-    # Attempt to connect to a TPU
-    tpu = tf.distribute.cluster_resolver.TPUClusterResolver.connect() 
+    tpu = tf.distribute.cluster_resolver.TPUClusterResolver()  # TPU detection
+    print('Running on TPU ', tpu.master())
+    tf.config.experimental_connect_to_cluster(tpu)
+    tf.tpu.experimental.initialize_tpu_system(tpu)
     strategy = tf.distribute.TPUStrategy(tpu)
-    print("✅ TPU found and connected.")
-    print('Running on TPU:', tpu.master())
 except ValueError:
-    # If TPU not found, fall back to the default strategy
-    # This will use MirroredStrategy for multiple GPUs, or
-    # OneDeviceStrategy for a single GPU or CPU.
-    strategy = tf.distribute.get_strategy()
-    print("⚠️ No TPU found. Using default strategy (GPU/CPU).")
+    # If TPU is not available, check for GPU.
+    print('⚠️ TPU not found. Checking for GPUs.')
+    if tf.config.list_physical_devices('GPU'):
+        # If GPUs are available, MirroredStrategy will use them all.
+        # If only one GPU is available, it will use that one.
+        strategy = tf.distribute.MirroredStrategy()
+        print(f'✅ Running on {len(tf.config.list_physical_devices("GPU"))} GPU(s).')
+    else:
+        # If no GPU is found, fall back to CPU
+        print('⚠️ No GPUs found. Running on CPU.')
+        strategy = tf.distribute.get_strategy() # Default strategy for CPU
 
-print(f"Strategy: {strategy.__class__.__name__}")
-print(f"Number of replicas: {strategy.num_replicas_in_sync}")
-# ---------------------------------
+print(f"REPLICAS: {strategy.num_replicas_in_sync}")
+# ----------------------------------------------------
 
 print(f"--- Step 3: Querying Data ---")
 print(f"Querying data from {ATHENA_DB}.trainning_v0_example...")

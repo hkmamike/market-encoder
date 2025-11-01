@@ -1,8 +1,8 @@
 # ---------------------------------
 # Same as model_v0_colab, trying to improve training speed by freezing earlier layer weights
-# Status: Unverified
-# Training Time: TBD
-# Next: TBD
+# Status: Verified that it runs: https://screenshot.googleplex.com/3YWuAbcWEGaxAt3
+# Training Time: 30s on Google Compute Backend Engine GPU
+# Next: wait for real training data.
 # ---------------------------------
 
 # ---------------------------------
@@ -58,7 +58,17 @@ try:
     tf.tpu.experimental.initialize_tpu_system(tpu)
     strategy = tf.distribute.TPUStrategy(tpu)
 except ValueError:
-    strategy = tf.distribute.get_strategy() # Default strategy that works on CPU and single GPU
+    # If TPU is not available, check for GPU.
+    print('⚠️ TPU not found. Checking for GPUs.')
+    if tf.config.list_physical_devices('GPU'):
+        # If GPUs are available, MirroredStrategy will use them all.
+        # If only one GPU is available, it will use that one.
+        strategy = tf.distribute.MirroredStrategy()
+        print(f'✅ Running on {len(tf.config.list_physical_devices("GPU"))} GPU(s).')
+    else:
+        # If no GPU is found, fall back to CPU
+        print('⚠️ No GPUs found. Running on CPU.')
+        strategy = tf.distribute.get_strategy() # Default strategy for CPU
 
 print(f"REPLICAS: {strategy.num_replicas_in_sync}")
 # ----------------------------------------------------
