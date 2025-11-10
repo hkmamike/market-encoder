@@ -307,7 +307,7 @@ else:
 
 # Model Evaluation
 # Todo: split the train and validation set before training. Also consider using test set.
-from sklearn.metrics import classification_report, confusion_matrix, f1_score, precision_score, recall_score
+from sklearn.metrics import classification_report, confusion_matrix, f1_score, precision_score, recall_score, accuracy_score
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -382,9 +382,12 @@ if df is not None:
    # ---------------------------------
    # Generate final class predictions using the best threshold
    val_predictions = (val_distances < best_threshold).astype(np.float32)
+   final_accuracy = accuracy_score(y_val, val_predictions)
+
 
    print("\n--- Final Validation Performance Report ---")
    print(f"Threshold used: {best_threshold:.2f}")
+   print(f"Fianl Accuracy: {final_accuracy:.2f}")
    print("\nConfusion Matrix:")
    # Format: [[TN, FP], [FN, TP]]
    print(confusion_matrix(y_val, val_predictions))
