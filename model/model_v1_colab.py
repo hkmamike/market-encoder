@@ -394,3 +394,67 @@ if df is not None:
 
 else:
    print("Cannot evaluate: DataFrame was not loaded.")
+
+
+# Step 11: Save Models (Both Encoder and Full Siamese Weights)
+
+print("\n--- Step 11: Saving Models ---")
+
+# Create a directory for models if it doesn't exist
+if not os.path.exists('saved_models'):
+    os.makedirs('saved_models')
+
+# =========================================
+# Save just the Encoder (Best for downstream use)
+# =========================================
+print("\n Saving standalone Encoder model...")
+try:
+    # 1. Define standard Keras inputs matching your tokenizer output exactly
+    # Note: We use int32 match typical TF input requirements for indices
+    enc_input_ids = tf.keras.layers.Input(shape=(MAX_LENGTH,), dtype=tf.int32, name='input_ids')
+    enc_attention_mask = tf.keras.layers.Input(shape=(MAX_LENGTH,), dtype=tf.int32, name='attention_mask')
+
+    # 2. Pass these inputs through the *trained* internal BERT encoder
+    # We use named arguments to be safe with the Transformers library
+    bert_output = siamese_model.bert_encoder(
+        input_ids=enc_input_ids,
+        attention_mask=enc_attention_mask
+    )
+
+    # 3. Extract the pooler_output (standard for classification/similarity tasks)
+    embeddings = bert_output.pooler_output
+
+    # 4. IMPORTANT: Replicate the L2 normalization from your SiameseModel.call()
+    # If you don't do this, the distances you calculate later will be wrong.
+    normalized_embeddings = tf.linalg.normalize(embeddings, axis=1)[0]
+
+    # 5. Create the Functional model
+    encoder_to_save = tf.keras.Model(
+        inputs=[enc_input_ids, enc_attention_mask],
+        outputs=normalized_embeddings,
+        name='finbert_encoder_normalized'
+    )
+
+    # 6. Save in standard Keras format
+    # Using .keras extension (recommended for TF 2.13+)
+    encoder_save_path = os.path.join('saved_models', 'finbert_siamese_encoder.keras')
+    encoder_to_save.save(encoder_save_path)
+    print(f"SUCCESS: Encoder model saved to: {encoder_save_path}")
+    print("Use this model to generate embeddings for new data.")
+
+except Exception as e:
+    print(f"FAILED to save encoder: {e}")
+
+# =========================================
+# Save full Siamese model weights (Best for resuming training)
+# =========================================
+print("Saving full Siamese model weights...")
+try:
+    # For subclassed models, saving weights is the most reliable method
+    weights_save_path = os.path.join('saved_models', 'siamese_complete_weights.h5')
+    siamese_model.save_weights(weights_save_path)
+    print(f"SUCCESS: Full Siamese weights saved to: {weights_save_path}")
+    print("To reload for more training: Instantiate a new SiameseModel and call .load_weights()")
+
+except Exception as e:
+    print(f"FAILED to save Siamese weights: {e}")
