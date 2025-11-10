@@ -304,3 +304,93 @@ if df is not None:
 
 else:
     print("\nSkipping training as DataFrame was not loaded.")
+
+# Model Evaluation
+# Todo: split the train and validation set before training. Also consider using test set.
+from sklearn.metrics import classification_report, confusion_matrix, f1_score, precision_score, recall_score
+import numpy as np
+import matplotlib.pyplot as plt
+
+print("\n--- Step 10: Evaluating on Validation Set ---")
+
+if df is not None:
+   # ---------------------------------
+   # 1. Reconstruct the Validation Set
+   # ---------------------------------
+   # Keras 'validation_split' takes the LAST portion of the data.
+   VAL_RATIO = 0.2
+   split_idx = int(len(y_train) * (1 - VAL_RATIO))
+
+   print(f"Recovering validation data from index {split_idx} to {len(y_train)}...")
+
+   # Slice the dictionary inputs
+   X_val = {
+       'input_ids_1': X_train['input_ids_1'][split_idx:],
+       'attention_mask_1': X_train['attention_mask_1'][split_idx:],
+       'input_ids_2': X_train['input_ids_2'][split_idx:],
+       'attention_mask_2': X_train['attention_mask_2'][split_idx:]
+   }
+   # Slice the labels
+   y_val = y_train[split_idx:]
+
+   # ---------------------------------
+   # 2. Generate Distance Predictions
+   # ---------------------------------
+   print("Running predictions on validation set...")
+   # The model outputs Euclidean distances
+   val_distances = siamese_model.predict(X_val, batch_size=128, verbose=1)
+   val_distances = val_distances.flatten()
+
+   # ---------------------------------
+   # 3. Determine Optimal Threshold
+   # ---------------------------------
+   # A Siamese network outputs distances, not classes. We need a threshold.
+   # If distance < threshold -> Predict 'Similar' (1)
+   # If distance >= threshold -> Predict 'Dissimilar' (0)
+
+   print("Finding optimal distance threshold based on F1 score...")
+   thresholds = np.arange(0.1, 3.0, 0.05)
+   best_f1 = -1
+   best_threshold = 0.5
+
+   f1_scores = []
+   for t in thresholds:
+       # Predict 1 if distance is small (less than t)
+       preds_t = (val_distances < t).astype(np.float32)
+       score = f1_score(y_val, preds_t, zero_division=0)
+       f1_scores.append(score)
+       if score > best_f1:
+           best_f1 = score
+           best_threshold = t
+
+   print(f"\nBest Threshold: {best_threshold:.2f}")
+   print(f"Best Validation F1: {best_f1:.4f}")
+
+   # Optional: Plot F1 vs Threshold to see stability
+   plt.figure(figsize=(8, 4))
+   plt.plot(thresholds, f1_scores, 'b-')
+   plt.axvline(x=best_threshold, color='r', linestyle='--', label=f'Best Threshold ({best_threshold:.2f})')
+   plt.title("F1 Score vs Distance Threshold")
+   plt.xlabel("Distance Threshold")
+   plt.ylabel("F1 Score")
+   plt.legend()
+   plt.savefig('threshold_f1_plot.png')
+   print("Threshold plot saved to 'threshold_f1_plot.png'")
+
+   # ---------------------------------
+   # 4. Final Evaluation Metrics
+   # ---------------------------------
+   # Generate final class predictions using the best threshold
+   val_predictions = (val_distances < best_threshold).astype(np.float32)
+
+   print("\n--- Final Validation Performance Report ---")
+   print(f"Threshold used: {best_threshold:.2f}")
+   print("\nConfusion Matrix:")
+   # Format: [[TN, FP], [FN, TP]]
+   print(confusion_matrix(y_val, val_predictions))
+
+   print("\nClassification Report:")
+   print(classification_report(y_val, val_predictions, target_names=['Dissimilar (0)', 'Similar (1)']))
+
+else:
+   print("Cannot evaluate: DataFrame was not loaded.")
