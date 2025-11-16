@@ -1,9 +1,8 @@
 # ---------------------------------
-# Baseline model
-# Input: 10 concat news titles
-# Output: closing price of vixy of the day
+# Same as model_v0_colab, trying to improve training speed by freezing earlier layer weights
+# Status: Verified that it runs: https://screenshot.googleplex.com/72MM73yZDPE2JkY
 # Training Time: 30s on Google Compute Backend Engine GPU
-# Next: Train on full dataset and evaluate regression metrics.
+# Next: wait for real training data.
 # ---------------------------------
 
 # ---------------------------------
@@ -41,7 +40,7 @@ AWS_REGION = 'us-east-2'
 S3_STAGING_DIR = 's3://cs230-market-data-2025/athena-query-results/'
 ATHENA_DB = 'cs230_finance_data'
 # Querying more data for a small training run
-SQL_QUERY = "SELECT concatarticles1, close1 FROM paired_vixy_w_titles_dedup_more_labels LIMIT 1000"
+SQL_QUERY = "SELECT concatarticles1, concatarticles2, close_1_vs_2 FROM trainning_v0_example LIMIT 1000"
 
 print(f"\n--- Step 3: Configuration set for {ATHENA_DB} ---")
 
@@ -75,7 +74,7 @@ print(f"REPLICAS: {strategy.num_replicas_in_sync}")
 # ----------------------------------------------------
 
 print(f"--- Step 4: Querying Data ---")
-print(f"Querying data from {ATHENA_DB}.paired_vixy_w_titles_dedup_more_labels...")
+print(f"Querying data from {ATHENA_DB}.trainning_v0_example...")
 
 # Define df in a wider scope
 df = None
@@ -118,14 +117,24 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 print(f"\n--- Step 6: Tokenizing Data ---")
 if df is not None:
     # Separate the text columns and the label
-    text_list = df['concatarticles1'].astype(str).tolist()
+    text1_list = df['concatarticles1'].astype(str).tolist()
+    text2_list = df['concatarticles2'].astype(str).tolist()
     # Ensure labels are float32 for the loss function
-    labels = df['close1'].astype('float32').values
+    labels = df['close_1_vs_2'].astype('float32').values
 
-    # Tokenize the text list
+    # Tokenize both text lists
     print("Tokenizing concatarticles1...")
-    encodings = tokenizer(
-        text_list,
+    encodings1 = tokenizer(
+        text1_list,
+        truncation=True,
+        padding='max_length',
+        max_length=MAX_LENGTH,
+        return_tensors='tf'
+    )
+
+    print("Tokenizing concatarticles2...")
+    encodings2 = tokenizer(
+        text2_list,
         truncation=True,
         padding='max_length',
         max_length=MAX_LENGTH,
@@ -133,9 +142,12 @@ if df is not None:
     )
 
     # Create the input dictionary for the Keras model
+    # This format matches the Input layers we will define
     X_train = {
-        'input_ids': encodings['input_ids'],
-        'attention_mask': encodings['attention_mask']
+        'input_ids_1': encodings1['input_ids'],
+        'attention_mask_1': encodings1['attention_mask'],
+        'input_ids_2': encodings2['input_ids'],
+        'attention_mask_2': encodings2['attention_mask']
     }
     y_train = labels
 
@@ -151,16 +163,18 @@ else:
 # ---------------------------------
 print(f"\n--- Step 7: Building Regression Model ---")
 
-class MarketRegressorModel(Model):
+class MarketDiffRegressor(Model):
     def __init__(self, bert_model_name, **kwargs):
-        super(MarketRegressorModel, self).__init__(**kwargs)
+        super(MarketDiffRegressor, self).__init__(**kwargs)
         # --- Define Shared Encoder ---
         self.bert_encoder = TFBertModel.from_pretrained(bert_model_name, from_pt=True)
-        
+
         # --- Define Regression Head ---
+        # We concatenate the two embeddings, so the input size is 2 * embedding_dim
+        # FinBERT's embedding dim is 768. 768 * 2 = 1536
         self.regressor = Dense(1, activation='linear', name='regressor')
         
-        # --- Freeze Layers ---
+       # --- Freeze Layers ---
         # Crucial: Set the TFBertModel itself to trainable=True for its internal layers' trainable status to be respected by the parent Model
         self.bert_encoder.trainable = True
 
@@ -179,28 +193,40 @@ class MarketRegressorModel(Model):
 
     def call(self, inputs):
         # Unpack the inputs
-        input_ids = inputs['input_ids']
-        attention_mask = inputs['attention_mask']
+        input_ids_1 = inputs['input_ids_1']
+        attention_mask_1 = inputs['attention_mask_1']
+        input_ids_2 = inputs['input_ids_2']
+        attention_mask_2 = inputs['attention_mask_2']
         
         # --- Process Inputs through Encoder ---
-        output = self.bert_encoder(input_ids=input_ids, attention_mask=attention_mask)
-        embedding = output.pooler_output
-        
-        # --- Pass embedding to the regression head ---
-        prediction = self.regressor(embedding)
+        # Tower 1
+        output_1 = self.bert_encoder(input_ids=input_ids_1, attention_mask=attention_mask_1)
+        embedding_1 = output_1.pooler_output
+
+        # Tower 2
+        output_2 = self.bert_encoder(input_ids=input_ids_2, attention_mask=attention_mask_2)
+        embedding_2 = output_2.pooler_output
+
+        # --- Concatenate embeddings and pass to regressor ---
+        concatenated_embeddings = tf.concat([embedding_1, embedding_2], axis=1)
+        prediction = self.regressor(concatenated_embeddings)
         
         return prediction
 
 with strategy.scope():
     # --- Instantiate the model ---
-    regressor_model = MarketRegressorModel(MODEL_NAME)
+    regression_model = MarketDiffRegressor(MODEL_NAME)
     
     # --- Build the model to create its weights ---
     if df is not None:
-      _ = regressor_model(
+      # We need to build the model to see a summary and save it later
+      # Pass a single sample through
+      _ = regression_model(
           {
-              'input_ids': X_train['input_ids'][:1],
-              'attention_mask': X_train['attention_mask'][:1]
+              'input_ids_1': X_train['input_ids_1'][:1],
+              'attention_mask_1': X_train['attention_mask_1'][:1],
+              'input_ids_2': X_train['input_ids_2'][:1],
+              'attention_mask_2': X_train['attention_mask_2'][:1]
           }
       )
 
@@ -209,18 +235,18 @@ with strategy.scope():
     # ---------------------------------
     print(f"\n--- Step 8: Compiling and Training Model ---")
 
-    regressor_model.compile(
+    regression_model.compile(
         loss=tf.keras.losses.MeanSquaredError(),
         optimizer=tf.keras.optimizers.Adam(learning_rate=2e-5)
     )
 
 if df is not None:
     # Start training
-    history = regressor_model.fit(
+    history = regression_model.fit(
         X_train,
         y_train,
         epochs=3,  # Start with a few epochs
-        batch_size=64 * strategy.num_replicas_in_sync, # Adjust based on GPU memory
+        batch_size=16 * strategy.num_replicas_in_sync, # Adjust based on GPU memory
         validation_split=0.2 # Use 20% of the data for validation
     )
 
@@ -252,5 +278,92 @@ if df is not None:
     # You can also use plt.show() if running in an interactive environment
     # plt.show()
 
+
+    # ---------------------------------
+    # Save Encoder Model
+    # ---------------------------------
+    # To save the encoder, you can create a separate model after training
+    # print("\n--- Step 10: Saving Encoder Model ---")
+    
+    # # Create input layers for the encoder
+    # input_ids = Input(shape=(MAX_LENGTH,), dtype='int32', name='input_ids')
+    # attention_mask = Input(shape=(MAX_LENGTH,), dtype='int32', name='attention_mask')
+    
+    # # Create the encoder model using the trained weights
+    # encoder_model = Model(
+    #     inputs=[input_ids, attention_mask],
+    #     outputs=regression_model.bert_encoder(input_ids=input_ids, attention_mask=attention_mask).pooler_output,
+    #     name="encoder"
+    # )
+
+    # encoder_model.save("finbert_encoder_model")
+    # print("Encoder model saved to 'finbert_encoder_model'.")
+    # print("You can now use this for the next stage of your project.")
+
 else:
     print("\nSkipping training as DataFrame was not loaded.")
+
+# Model Evaluation
+# TODO: Add regression-specific evaluation (e.g., MAE, R^2 score)
+print("\n--- Step 10: Evaluating on Validation Set ---")
+print("Skipping detailed evaluation for this version. You can add regression metrics like MAE, MSE, or R-squared here.")
+
+
+# Step 11: Save Models (Both Encoder and Full Siamese Weights)
+
+print("\n--- Step 11: Saving Models ---")
+
+# Create a directory for models if it doesn't exist
+if not os.path.exists('saved_models'):
+    os.makedirs('saved_models')
+
+# =========================================
+# Save just the Encoder (Best for downstream use)
+# =========================================
+print("\n Saving standalone Encoder model...")
+try:
+    # 1. Define standard Keras inputs matching your tokenizer output exactly
+    # Note: We use int32 match typical TF input requirements for indices
+    enc_input_ids = tf.keras.layers.Input(shape=(MAX_LENGTH,), dtype=tf.int32, name='input_ids')
+    enc_attention_mask = tf.keras.layers.Input(shape=(MAX_LENGTH,), dtype=tf.int32, name='attention_mask')
+
+    # 2. Pass these inputs through the *trained* internal BERT encoder
+    # We use named arguments to be safe with the Transformers library
+    bert_output = regression_model.bert_encoder(
+        input_ids=enc_input_ids,
+        attention_mask=enc_attention_mask
+    )
+
+    # 3. Extract the pooler_output (standard for classification/similarity tasks)
+    embeddings = bert_output.pooler_output
+
+    # 4. Create the Functional model
+    encoder_to_save = tf.keras.Model(
+        inputs=[enc_input_ids, enc_attention_mask],
+        outputs=embeddings,
+        name='finbert_encoder'
+    )
+
+    # 6. Save in standard Keras format
+    # Using .keras extension (recommended for TF 2.13+)
+    encoder_save_path = os.path.join('saved_models', 'finbert_siamese_encoder.keras')
+    encoder_to_save.save(encoder_save_path)
+    print(f"SUCCESS: Encoder model saved to: {encoder_save_path}")
+    print("Use this model to generate embeddings for new data.")
+
+except Exception as e:
+    print(f"FAILED to save encoder: {e}")
+
+# =========================================
+# Save full regression model weights (Best for resuming training)
+# =========================================
+print("Saving full regression model weights...")
+try:
+    # For subclassed models, saving weights is the most reliable method
+    weights_save_path = os.path.join('saved_models', 'regression_model_weights.h5')
+    regression_model.save_weights(weights_save_path)
+    print(f"SUCCESS: Full regression model weights saved to: {weights_save_path}")
+    print("To reload for more training: Instantiate a new MarketDiffRegressor and call .load_weights()")
+
+except Exception as e:
+    print(f"FAILED to save regression model weights: {e}")
