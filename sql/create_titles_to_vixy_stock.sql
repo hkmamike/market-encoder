@@ -1,6 +1,6 @@
-CREATE TABLE cs230_finance_data.titles_10_to_vixy WITH (
+CREATE TABLE cs230_finance_data.titles_10_to_vixy_open_lead_close_lag WITH (
     format = 'PARQUET',
-    external_location = 's3://cs230-market-data-2025/titles_10_to_vixy'
+    external_location = 's3://cs230-market-data-2025/titles_10_dedup_to_vixy_open_lead_close_lag'
 ) AS WITH T2_ARTICLES AS (
     SELECT
         *,
@@ -9,16 +9,17 @@ CREATE TABLE cs230_finance_data.titles_10_to_vixy WITH (
         (rn - 1) / 10 as article_group
     FROM
         (
-            SELECT
+            SELECT DISTINCT
                 TRY_CAST(SUBSTR(t2.date, 1, 10) AS DATE) AS clean_date,
-                t2.*,
-                -- Pass through all original columns
+                t2.article_title, -- Explicitly select only the necessary columns
+                -- t2.article_stock_symbol,
+                -- t2.url,
+                -- t2.publisher,
                 -- Add row number partitioned by the clean_date
                 ROW_NUMBER() OVER (
                     PARTITION BY TRY_CAST(SUBSTR(t2.date, 1, 10) AS DATE)
-                    ORDER BY
-                        t2.article_title -- using title as an arbitrary but stable sort
-                ) as rn
+                    ORDER BY RANDOM()
+                ) AS rn
             FROM
                 cs230_finance_data.articles_no_scrape t2
         ) sub
@@ -35,7 +36,8 @@ SELECT
     ANY_VALUE(t1.close) as close,
     ANY_VALUE(t1.adj_close) as adj_close,
     ANY_VALUE(t1.volume) as volume,
-    ANY_VALUE(t1.close_lead_lag_diff) as close_lead_lag_diff,
+    ANY_VALUE(t1.open_lead_close_lag_diff) as open_lead_close_lag_diff,
+    ANY_VALUE(t1.open_lead_close_lag_change_pct) as open_lead_close_lag_change_pct,
     -- Aggregate article titles with a '|' separator
     -- Use ARRAY_JOIN(ARRAY_AGG(...)) as the alternative to STRING_AGG
     ARRAY_JOIN(ARRAY_AGG(t2.article_title), '|') as aggregated_article_title -- Other t2 columns (article_stock_symbol, url, publisher) are dropped
@@ -43,7 +45,7 @@ SELECT
 FROM
     T2_ARTICLES t2
     LEFT JOIN -- Join directly to the table instead of using the CTE
-    cs230_finance_data.vixy_stocks t1 ON t2.clean_date = t1.date -- Group by the date from the prices table AND the new article group
+    cs230_finance_data.vixy_stocks_open_lead_close_lag t1 ON t2.clean_date = t1.date -- Group by the date from the prices table AND the new article group
 GROUP BY
     t1.date,
     t2.article_group
