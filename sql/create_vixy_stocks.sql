@@ -1,7 +1,4 @@
-CREATE TABLE cs230_finance_data.vixy_stocks_open_lead_close_lag WITH (
-    format = 'PARQUET',
-    external_location = 's3://cs230-market-data-2025/vixy_stocks_open_lead_close_lag'
-) AS
+CREATE TABLE IF NOT EXISTS cs230_finance_data.vixy_stocks_open_lead_close_lag AS AS
 SELECT
     stock_symbol,
     CAST(date AS DATE) as date,
