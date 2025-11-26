@@ -1,6 +1,6 @@
 """
-Scrapes financial news articles from URLs provided in a Hugging Face dataset
-and uploads the results directly to an S3 bucket in chunked CSV files.
+Loads data from a Hugging Face dataset and uploads the results directly
+to an S3 bucket in chunked CSV files.
 
 This script is designed to handle very large datasets by processing them
 in memory-efficient chunks and supports processing specific row ranges.
@@ -10,9 +10,7 @@ This script performs the following steps:
 2. Iterates through the stream, processing articles in chunks (e.g., 10,000 rows),
    respecting the start and end row boundaries.
 3. For each chunk:
-    a. Scrapes the text content from the URLs.
-    b. Adds the scraped text as a new column named 'scraped_text'.
-    c. Saves the processed chunk as a separate CSV (e.g., 'part-00001.csv').
+    a. Trims and cleans whitespace
 4. Uploads each CSV chunk directly to a specified S3 prefix (folder).
 
 Valid Command-Line Arguments:
@@ -28,22 +26,22 @@ Valid Command-Line Arguments:
 
 Example Usage:
   # To process the full 'train' dataset (default)
-  python scrape_news_in_chunk.py
+  python process_fnspid.py
 
   # To process ONLY the first 1%, 157,000 rows
-  python scrape_news_in_chunk.py --end-row 157000 --s3-prefix 1-percent
+  python process_fnspid.py --end-row 157000 --s3-prefix 1-percent
 
   # To process the 2nd percent, 157,000 rows (starting from row 157,000)
-  python scrape_news_in_chunk.py --start-row 157000 --end-row 314000 --s3-prefix 1-2-percent
+  python process_fnspid.py --start-row 157000 --end-row 314000 --s3-prefix 1-2-percent
 
   # To process the REMAINING rows after 1st percent (starting from row 157,000)
-  python scrape_news_in_chunk.py --start-row 157000 --s3-prefix 1-99-percent
+  python process_fnspid.py --start-row 157000 --s3-prefix 1-99-percent
 
   # To upload the first 1% 157,000 rows WITHOUT scraping
-  python scrape_news_in_chunk.py --end-row 157000 --no-scrape --s3-prefix 1-percent-no-scrape
+  python process_fnspid.py --end-row 157000 --no-scrape --s3-prefix 1-percent-no-scrape
 
   # To upload the all data WITHOUT scraping
-  python scrape_news_in_chunk.py --end-row 15700000 --no-scrape --s3-prefix all-data-no-scrape
+  python process_fnspid.py --end-row 15700000 --no-scrape --s3-prefix all-data-no-scrape
 """
 
 import pandas as pd
@@ -52,7 +50,6 @@ import requests
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 import argparse
-# import newspaper
 from io import StringIO
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
@@ -61,7 +58,6 @@ import csv
 from collections import defaultdict
 
 # --- Configuration ---
-# DATASET_PATH = "Zihan1004/FNSPID"
 DATASET_PATH = "sabareesh88/FNSPID_nasdaq"
 REQUEST_TIMEOUT = 10
 USER_AGENT = 'Mozilla/5.0'
@@ -74,14 +70,6 @@ AWS_PROFILE_NAME = "team-s3-uploader"
 
 # --- Chunking Configuration ---
 CHUNK_SIZE = 15700000  # Process 10,000 articles at a time
-# CHUNK_SIZE = 15700  # Process 100 articles at a time
-
-GLOBAL_SUMMARY_COUNTS = defaultdict(int)
-# --- List of columns to check for being populated ---
-SUMMARY_COLUMNS = [
-    'Article', 'Lsa_summary', 'Luhn_summary', 
-    'Textrank_summary', 'Lexrank_summary'
-]
 
 def upload_df_to_s3(df, bucket, s3_object_key, region):
     """
@@ -89,9 +77,9 @@ def upload_df_to_s3(df, bucket, s3_object_key, region):
     """
     print(f"Uploading DataFrame to bucket '{bucket}' as '{s3_object_key}'...")
     csv_buffer = StringIO()
-    # *** CSV INTEGRITY FIX: Use QUOTE_NONNUMERIC ***
-    # This forces quotes around all string fields, which prevents internal commas
-    # (e.g., in the 'scraped_text' column) from breaking the CSV structure.
+    # QUOTE_NONNUMERIC forces quotes around all string fields, which prevents
+    # internal commas (e.g., in the 'Article' column) from breaking the CSV
+    # structure.
     df.to_csv(csv_buffer, index=False, quoting=csv.QUOTE_NONNUMERIC)
     csv_content = csv_buffer.getvalue()
     session = boto3.Session(profile_name=AWS_PROFILE_NAME, region_name=region)
@@ -126,7 +114,6 @@ def clean_spaced_text(text):
         return re.sub(r'([a-zA-Z])\s([a-zA-Z])', r'\1\2', text)
     
     return text
-
 
 def process_chunk(chunk_list, chunk_index, no_scrape=False):
     """
@@ -201,29 +188,17 @@ def main():
 
     # --- Schema Definition ---
     feature_schema = Features({
-        # 1. 'Unnamed: 0' (Must be first as per the error message)
         'Unnamed: 0': Value('string'),
-        # 2. 'Date'
         'Date': Value('string'),
-        # 3. 'Article_title'
         'Article_title': Value('string'),
-        # 4. 'Stock_symbol'
         'Stock_symbol': Value('string'),
-        # 5. 'Url'
         'Url': Value('string'),
-        # 6. 'Publisher'
         'Publisher': Value('string'),
-        # 7. 'Author' <--- This was the key column missing/misplaced
         'Author': Value('string'), 
-        # 8. 'Article'
         'Article': Value('string'),
-        # 9. 'Lsa_summary'
         'Lsa_summary': Value('string'),
-        # 10. 'Luhn_summary'
         'Luhn_summary': Value('string'),
-        # 11. 'Textrank_summary'
         'Textrank_summary': Value('string'),
-        # 12. 'Lexrank_summary'
         'Lexrank_summary': Value('string')
     })
 
@@ -231,9 +206,8 @@ def main():
     start_row = args.start_row
     end_row = args.end_row
         
-    # print(f"--- Starting Scrape ---")
     print(f"Processing rows from {start_row} up to {end_row if end_row != -1 else 'the end'}.")
-    # print(f"Uploading chunks to: s3://{S3_BUCKET_NAME}/{args.s3_prefix}/")
+    print(f"Uploading chunks to: s3://{S3_BUCKET_NAME}/{args.s3_prefix}/")
 
     # --- Load Dataset (Streaming) ---
     # We always load the full 'train' split now
@@ -324,5 +298,4 @@ def main():
     print(f"Data is available in S3 at: s3://{S3_BUCKET_NAME}/{args.s3_prefix}/")
 
 if __name__ == '__main__':
-    # GLOBAL_SUMMARY_COUNTS.clear()
     main()
