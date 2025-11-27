@@ -46,22 +46,19 @@ Example Usage:
 
 import pandas as pd
 from datasets import load_dataset, Features, Value
-import requests
-from bs4 import BeautifulSoup
 from tqdm import tqdm
 import argparse
-from io import StringIO
 import boto3
-from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
-import re
 import csv
-from collections import defaultdict
+from boto3.s3.transfer import TransferConfig
+import uuid
+import os
 
 # --- Configuration ---
 DATASET_PATH = "sabareesh88/FNSPID_nasdaq"
 REQUEST_TIMEOUT = 10
-USER_AGENT = 'Mozilla/5.0'
-HUGGING_FACE_SPLIT = 'train' # train/validation/test
+USER_AGENT = "Mozilla/5.0"
+HUGGING_FACE_SPLIT = "train"  # train/validation/test
 
 # --- S3 Configuration ---
 S3_BUCKET_NAME = "cs230-market-data-2025"
@@ -69,53 +66,93 @@ AWS_REGION = "us-east-2"
 AWS_PROFILE_NAME = "team-s3-uploader"
 
 # --- Chunking Configuration ---
-CHUNK_SIZE = 15700000  # Process 10,000 articles at a time
+CHUNK_SIZE = 100000  # Process 100,000 articles at a time
+# Define a standard multi-part chunk size (e.g., 50MB) for the transfer manager
+MB_50 = 50 * 1024 * 1024
+LOCAL_TEMP_DIR = "temp_s3_uploads"
 
-def upload_df_to_s3(df, bucket, s3_object_key, region):
+TARGET_DTYPES = {
+    "Date": "string",
+    "Article_title": "string",
+    "Stock_symbol": "string", 
+    "Url": "string",
+    "Publisher": "string",
+    "Author": "string",
+    "Article": "string",
+    "Lsa_summary": "string",
+    "Luhn_summary": "string",
+    "Textrank_summary": "string",
+    "Lexrank_summary": "string",
+}
+
+TEXT_CLEANUP_COLUMNS = [
+    "Article_title",
+    "Article",
+    "Publisher",
+    "Author",
+    "Lsa_summary",
+    "Luhn_summary",
+    "Textrank_summary",
+    "Lexrank_summary",
+]
+
+
+def upload_df_to_s3(df, bucket, s3_object_key, region, chunk_index):
     """
     Uploads a pandas DataFrame to an S3 bucket as a CSV file.
     """
-    print(f"Uploading DataFrame to bucket '{bucket}' as '{s3_object_key}'...")
-    csv_buffer = StringIO()
-    # QUOTE_NONNUMERIC forces quotes around all string fields, which prevents
-    # internal commas (e.g., in the 'Article' column) from breaking the CSV
-    # structure.
-    df.to_csv(csv_buffer, index=False, quoting=csv.QUOTE_NONNUMERIC)
-    csv_content = csv_buffer.getvalue()
-    session = boto3.Session(profile_name=AWS_PROFILE_NAME, region_name=region)
-    s3_client = session.client('s3')
+    if not os.path.exists(LOCAL_TEMP_DIR):
+        os.makedirs(LOCAL_TEMP_DIR)
+
+    temp_filename = os.path.join(
+        LOCAL_TEMP_DIR, f"chunk-{chunk_index}-{uuid.uuid4()}.csv"
+    )
+    print(f"Saving chunk temporarily to disk: {temp_filename}")
     try:
-        s3_client.put_object(Bucket=bucket, Key=s3_object_key, Body=csv_content)
-        print("Upload Successful!")
-        return True
-    except (NoCredentialsError, PartialCredentialsError):
-        print("Error: AWS credentials not found.")
-        return False
-    except ClientError as e:
-        print(f"An S3 client error occurred: {e}")
-        return False
+        # Write the entire CSV content to disk
+        df.to_csv(
+            temp_filename, index=False, quoting=csv.QUOTE_NONNUMERIC, encoding="utf-8"
+        )
+
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(f"❌ Error during local CSV write: {e}")
         return False
 
-def clean_spaced_text(text):
-    """
-    Removes extraneous spaces between characters (e.g., 'A p p l e' -> 'Apple').
-    This fixes common OCR/encoding errors seen in source data.
-    """
-    if pd.isna(text) or text is None:
-        return text
-    
-    text = str(text).strip()
-    
-    # Simple heuristic to avoid over-cleaning normal text: check for excessive spacing.
-    if len(text) > 5 and ' ' in text and len(text) / len(''.join(text.split())) > 1.5:
-        # Replaces a space that occurs between two non-space characters
-        return re.sub(r'([a-zA-Z])\s([a-zA-Z])', r'\1\2', text)
-    
-    return text
+    session = boto3.Session(profile_name=AWS_PROFILE_NAME, region_name=region)
+    s3_client = session.client("s3")
+    config = TransferConfig(multipart_threshold=MB_50, multipart_chunksize=MB_50)
 
-def process_chunk(chunk_list, chunk_index, no_scrape=False):
+    try:
+        print(
+            f"Starting multi-part upload of {temp_filename} to S3 as {s3_object_key}..."
+        )
+
+        s3_client.upload_file(temp_filename, bucket, s3_object_key, Config=config)
+        print("S3 Upload Successful!")
+
+    except Exception as e:
+        print(f"❌ An S3 client error occurred during multi-part upload: {e}")
+
+    finally:
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+            print(f"Cleaned up temporary file: {temp_filename}")
+
+
+def clean_internal_newlines(df):
+    """Replaces all internal newline characters with a single space."""
+    for col in TEXT_CLEANUP_COLUMNS:
+        # Check if the column exists and is a string type
+        if col in df.columns and pd.api.types.is_string_dtype(df[col]):
+            df[col] = df[col].str.replace(r"[\n\r]+", " ", regex=True).str.strip()
+            df[col] = df[col].str.replace('"', "'", regex=False)
+            df[col] = df[col].str.strip()
+    return df
+
+
+def process_chunk(
+    chunk_list, chunk_index, s3_prefix, s3_bucket, region, no_scrape=False
+):
     """
     Converts a list of rows to a DataFrame, scrapes, and uploads to S3.
     """
@@ -124,28 +161,19 @@ def process_chunk(chunk_list, chunk_index, no_scrape=False):
         return
 
     print(f"--- Processing chunk {chunk_index} ({len(chunk_list)} rows) ---")
-    
-    # 1. Convert chunk to DataFrame
+
     df = pd.DataFrame(chunk_list)
 
-    if 'Unnamed: 0' in df.columns:
-        df.drop(columns=['Unnamed: 0'], inplace=True)
-    
-    # 2. Scrape the text, unless --no-scrape is specified
-    if not no_scrape:
-        tqdm.pandas(desc=f"Scraping Chunk {chunk_index}")
-        df['scraped_text'] = df['Url'].progress_apply(scrape_text_v1)
-    else:
-        print(f"Skipping scraping for chunk {chunk_index} as requested.")
-    
-    # 3. Determine S3 object key for this chunk
-    # zfill(5) pads the number (e.g., 1 -> 00001) for correct file ordering
+    if "Unnamed: 0" in df.columns:
+        df.drop(columns=["Unnamed: 0"], inplace=True)
+
+    df = df.astype({k: v for k, v in TARGET_DTYPES.items() if k in df.columns})
+    df = clean_internal_newlines(df)
+
     s3_object_key = f"{s3_prefix.rstrip('/')}/part-{chunk_index:05d}.csv"
-    
-    # 4. Upload this chunk
-    upload_df_to_s3(df, s3_bucket, s3_object_key, region)
+    upload_df_to_s3(df, s3_bucket, s3_object_key, region, chunk_index)
     print(f"--- Chunk {chunk_index} completed ---")
-    return df
+
 
 def main():
     """
@@ -153,149 +181,118 @@ def main():
     and save the updated data to S3.
     """
     # --- Argument Parsing ---
-    parser = argparse.ArgumentParser(description="Scrape financial news articles in chunks from row ranges.")
-    
+    parser = argparse.ArgumentParser(
+        description="Scrape financial news articles in chunks from row ranges."
+    )
+
     parser.add_argument(
         "--s3-prefix",
         type=str,
         default="processed_data/sabareesh88",
-        help="The S3 'folder' (prefix) to upload chunked CSV files to."
+        help="The S3 'folder' (prefix) to upload chunked CSV files to.",
     )
     parser.add_argument(
         "--start-row",
         type=int,
         default=0,
-        help="The row index to start processing from (inclusive). Defaults to 0."
+        help="The row index to start processing from (inclusive). Defaults to 0.",
     )
     parser.add_argument(
         "--end-row",
         type=int,
         default=-1,
-        help="The row index to stop processing at (exclusive). Defaults to -1 (no limit)."
+        help="The row index to stop processing at (exclusive). Defaults to -1 (no limit).",
     )
     parser.add_argument(
         "--no-scrape",
         action="store_true",
-        help="If specified, skips the scraping process and uploads the raw data directly."
+        help="If specified, skips the scraping process and uploads the raw data directly.",
     )
     args = parser.parse_args()
 
     # --- Config Validation ---
     if S3_BUCKET_NAME == "your-s3-bucket-name-here":
         print("--- CONFIGURATION NEEDED ---")
-        print("Please edit the script and replace 'your-s3-bucket-name-here' with your actual S3 bucket name.")
+        print(
+            "Please edit the script and replace 'your-s3-bucket-name-here' with your actual S3 bucket name."
+        )
         return
-
-    # --- Schema Definition ---
-    feature_schema = Features({
-        'Unnamed: 0': Value('string'),
-        'Date': Value('string'),
-        'Article_title': Value('string'),
-        'Stock_symbol': Value('string'),
-        'Url': Value('string'),
-        'Publisher': Value('string'),
-        'Author': Value('string'), 
-        'Article': Value('string'),
-        'Lsa_summary': Value('string'),
-        'Luhn_summary': Value('string'),
-        'Textrank_summary': Value('string'),
-        'Lexrank_summary': Value('string')
-    })
 
     # --- Argument logic for row limits ---
     start_row = args.start_row
     end_row = args.end_row
-        
-    print(f"Processing rows from {start_row} up to {end_row if end_row != -1 else 'the end'}.")
+
+    print(
+        f"Processing rows from {start_row} up to {end_row if end_row != -1 else 'the end'}."
+    )
     print(f"Uploading chunks to: s3://{S3_BUCKET_NAME}/{args.s3_prefix}/")
 
-    # --- Load Dataset (Streaming) ---
-    # We always load the full 'train' split now
-    print(f"Loading dataset stream from Hugging Face ({DATASET_PATH}, split='{HUGGING_FACE_SPLIT}')...")
-    streaming_dataset = load_dataset(
+    # --- Load Dataset ---
+    print(
+        f"Loading dataset from Hugging Face ({DATASET_PATH}, split='{HUGGING_FACE_SPLIT}')..."
+    )
+    full_dataset = load_dataset(
         DATASET_PATH,
         split=HUGGING_FACE_SPLIT,
-        features=feature_schema,
-        streaming=True
     )
+
+    total_dataset_size = len(full_dataset)
+    print(f"Full dataset size: {total_dataset_size} rows")
 
     # --- Chunked Processing Loop ---
     chunk = []
-    chunk_index = 0
     total_rows_processed = 0
     current_row_index = 0
-    all_chunks = []
 
-    # Use tqdm to create a progress bar for the stream
-    stream_progress = tqdm(streaming_dataset, desc="Streaming rows")
+    for current_row_index in tqdm(
+        range(start_row, total_dataset_size), desc="Processing rows"
+    ):
+        row = full_dataset[current_row_index]
 
-    for row in stream_progress:
-        # 1. Skip rows before our start_row
-        if current_row_index < start_row:
-            if (current_row_index + 1) % 100000 == 0: # Update progress bar periodically while skipping
-                 stream_progress.set_description(f"Skipping to start row... at {current_row_index + 1}")
-            current_row_index += 1
-            continue
-
-        # 2. Stop if we've reached our end_row
         if end_row != -1 and current_row_index >= end_row:
             print(f"\nReached end-row limit of {end_row}. Stopping stream.")
             break
-        
-        # Add row to the current chunk
+
         chunk.append(row)
 
-        # Check if the chunk is full
         if len(chunk) >= CHUNK_SIZE:
-            # Pass the *absolute* chunk index for unique file naming
-            absolute_chunk_index = (current_row_index // CHUNK_SIZE)
-            processed_df = process_chunk(
-                chunk, absolute_chunk_index, args.no_scrape
+            absolute_chunk_index = current_row_index // CHUNK_SIZE
+            process_chunk(
+                chunk,
+                absolute_chunk_index,
+                args.s3_prefix,
+                S3_BUCKET_NAME,
+                AWS_REGION,
+                args.no_scrape,
             )
-            
-            if processed_df is not None:
-                all_chunks.append(processed_df)
-                total_rows_processed += len(chunk)
-            
+
+            total_rows_processed += len(chunk)
             chunk = []  # Reset the chunk
-        
+
         current_row_index += 1
 
     # Process the final, partial chunk
     if chunk:
         print("Processing the final partial chunk...")
-        absolute_chunk_index = (current_row_index // CHUNK_SIZE)
-        processed_df = process_chunk(
-            chunk, absolute_chunk_index, args.no_scrape
+        absolute_chunk_index = current_row_index // CHUNK_SIZE
+        process_chunk(
+            chunk,
+            absolute_chunk_index,
+            args.s3_prefix,
+            S3_BUCKET_NAME,
+            AWS_REGION,
+            args.no_scrape,
         )
 
-        if processed_df is not None:
-            all_chunks.append(processed_df)
-            total_rows_processed += len(chunk)
-            
-    if all_chunks:
-        print(f"Concatenating {len(all_chunks)} chunks...")
-        # Concatenate all DataFrames into one master DataFrame
-        master_df = pd.concat(all_chunks, ignore_index=True)
-        
-        # --- Define Master Output Keys ---
-        master_local_file_name = "fnspid_nasdaq_combined.csv"
-        master_s3_object_key = f"{args.s3_prefix.rstrip('/')}/{master_local_file_name}"
-        
-        # 1. Local Save (Recommended for debugging)
-        master_df.to_csv(master_local_file_name, index=False, quoting=csv.QUOTE_NONNUMERIC)
-        print(f"**Local master copy saved as: {master_local_file_name}**")
-        
-        # 2. S3 Upload of the single master file
-        upload_df_to_s3(master_df, S3_BUCKET_NAME, master_s3_object_key, AWS_REGION)
+        total_rows_processed += len(chunk)
 
     else:
         print("No data chunks were processed or found.")
 
-    print(f"\n--- Scraping complete ---")
     print(f"Total rows processed in this run: {total_rows_processed}")
     print(f"Last row index processed: {current_row_index - 1}")
     print(f"Data is available in S3 at: s3://{S3_BUCKET_NAME}/{args.s3_prefix}/")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
